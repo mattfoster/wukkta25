@@ -1,9 +1,3 @@
-// Example for drawSmoothCircle function. Which draws anti-aliased circles
-// The circle periphery has a "thickness" of ~3 pixles to minimise the
-// "braiding" effect present in narrow anti-aliased lines.
-
-// For thicker or thinner circle outlines use the drawArc function.
-
 #include <TFT_eSPI.h>
 #include "NotoSansBold15.h"
 
@@ -11,13 +5,15 @@ TFT_eSPI tft = TFT_eSPI();  // Create object "tft"
 TFT_eSprite face = TFT_eSprite(&tft);
 uint16_t radar_fg = 0x07C0;
 
-// static uint16_t trace = 0;
-
 #define CLOCK_R       127.0f / 2.0f
 #define FACE_W        CLOCK_R * 2 + 1
 #define FACE_H    CLOCK_R * 2 + 1
 #define CX tft.width()  / 2.0f
 #define CY tft.height() / 2.0f
+
+#define LED_PIN_A D3
+#define LED_PIN_B D4
+ 
 
 // TODO: how to scan and store all these.
 struct btle_readings {
@@ -34,6 +30,7 @@ struct btle_readings badges;
 // Setup
 // -------------------------------------------------------------------------
 void setup(void) {
+
   Serial.begin(115200);
   tft.init();
 
@@ -70,6 +67,21 @@ int find_name(char *name) {
   }
 
   return -1;
+}
+
+void led_1(){
+  // charlieplexing
+  pinMode(LED_PIN_A, OUTPUT);
+  pinMode(LED_PIN_B, OUTPUT);
+  digitalWrite(LED_PIN_A, HIGH);
+  digitalWrite(LED_PIN_B, LOW);
+}
+ 
+void led_2(){
+  pinMode(LED_PIN_A, OUTPUT);
+  pinMode(LED_PIN_B, OUTPUT);
+  digitalWrite(LED_PIN_A, LOW);
+  digitalWrite(LED_PIN_B, HIGH);
 }
 
 
@@ -137,7 +149,10 @@ void loop()
   
   renderRadar();
   delay(100);
- 
+  led_1();
+  delay(100);
+  led_2();
+
 }
 
 // =========================================================================
