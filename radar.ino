@@ -5,6 +5,8 @@
 #include "NotoSansBold15.h"
 #include "screwdriver.h"
 
+uint8_t debug = 1;
+
 // PNG cruft
 PNG png; // PNG decoder instance
 #define MAX_IMAGE_WIDTH 240
@@ -71,9 +73,24 @@ struct btle_readings {
 
 struct btle_readings badges;
 
+void button1ISR() {
+  // See: https://github.com/evert-arias/EasyButton/blob/main/examples/Interrupts/Interrupts.ino#L31
+  button1.read();
+}
 
-void onButton1Pressed(){
-  Serial.print(1);
+void button2ISR() {
+  button2.read();
+}
+
+void button3ISR() {
+  button3.read();
+}
+
+void button4ISR() {
+  button4.read();
+}
+
+void onButton1Pressed() {
   pinMode(LED_PIN_A, OUTPUT);
   pinMode(LED_PIN_B, OUTPUT);
   pinMode(LED_PIN_C, INPUT);
@@ -83,7 +100,6 @@ void onButton1Pressed(){
 }
 
 void onButton2Pressed(){
-  Serial.print(3);
   pinMode(LED_PIN_A, INPUT);
   pinMode(LED_PIN_B, OUTPUT);
   pinMode(LED_PIN_C, OUTPUT);
@@ -93,7 +109,6 @@ void onButton2Pressed(){
 }
  
 void onButton3Pressed(){
-  Serial.print(2);
   pinMode(LED_PIN_A, OUTPUT);
   pinMode(LED_PIN_B, OUTPUT);
   pinMode(LED_PIN_C, INPUT);
@@ -103,7 +118,6 @@ void onButton3Pressed(){
 }
 
 void onButton4Pressed(){
-  Serial.print(4);
   pinMode(LED_PIN_A, INPUT);
   pinMode(LED_PIN_B, OUTPUT);
   pinMode(LED_PIN_C, OUTPUT);
@@ -133,6 +147,20 @@ void setup(void) {
   button2.onPressed(onButton2Pressed);
   button3.onPressed(onButton3Pressed);
   button4.onPressed(onButton4Pressed);
+
+  if (button1.supportsInterrupt()) {
+    button1.enableInterrupt(button1ISR);
+  }
+  if (button2.supportsInterrupt()) {
+    button2.enableInterrupt(button2ISR);
+  }
+  if (button3.supportsInterrupt()) {
+    button3.enableInterrupt(button3ISR);
+  }
+  if (button4.supportsInterrupt()) {
+    button4.enableInterrupt(button4ISR);
+  }
+
 
   face.createSprite(tft.width(), tft.height());
 
@@ -228,16 +256,6 @@ void renderRadar()
 // -------------------------------------------------------------------------
 void loop()
 {
-
-  // Read buttons on each loop
-  // TODO: do we want to make this a state machine style thing with callbacks
-  // Can we use interrupts? probably yes on all gpio.
-  // See: https://github.com/evert-arias/EasyButton/blob/main/examples/Interrupts/Interrupts.ino#L31
-  // So do we want a state machine???
-  button1.read();
-  button2.read();
-  button3.read();
-  button4.read();
 
   // Get signal strengths here
   badges.str1 = random(0, 120);
