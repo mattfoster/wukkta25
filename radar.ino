@@ -1,5 +1,37 @@
 #include <TFT_eSPI.h>
+#include <EasyButton.h>
+#include <PNGdec.h>
+
 #include "NotoSansBold15.h"
+#include "screwdriver.h"
+
+// PNG cruft
+PNG png; // PNG decoder instance
+#define MAX_IMAGE_WIDTH 240
+int16_t xpos = 0;
+int16_t ypos = 0;
+
+// Image ideas.....
+// show screwdriver spash image, pick user? 
+// then what, do we want others too? 
+// if so in flash? (for now yes)
+
+// If we don't pick a user???
+// Just look for other badges and display strength? 
+
+// function ideas:
+// scan for other badges, draw segments for each detected.
+// make number of segments variable
+// BT:
+// advertise self (allow naming??)
+// scan every X sections
+// flash LEDs? 
+// what shall the buttons do? 
+
+// button ideas
+// bluetooth macropad??
+
+
 
 TFT_eSPI tft = TFT_eSPI();  // Create object "tft"
 TFT_eSprite face = TFT_eSprite(&tft);
@@ -11,9 +43,22 @@ uint16_t radar_fg = 0x07C0;
 #define CX tft.width()  / 2.0f
 #define CY tft.height() / 2.0f
 
+// Pins for charlieplexing LEDS. We have 4 in total, one for each MX switch
 #define LED_PIN_A D3
 #define LED_PIN_B D4
+#define LED_PIN_C D5
  
+// Pins for MX switches. No debounce hardware so this will need doing in software
+// Use EasyButton
+#define SW_PIN_A D7
+#define SW_PIN_B D6
+#define SW_PIN_C D9 // problem
+#define SW_PIN_D D2
+
+EasyButton button1(SW_PIN_A);
+EasyButton button2(SW_PIN_B);
+EasyButton button3(SW_PIN_C);
+EasyButton button4(SW_PIN_D);
 
 // TODO: how to scan and store all these.
 struct btle_readings {
@@ -26,6 +71,49 @@ struct btle_readings {
 
 struct btle_readings badges;
 
+
+void onButton1Pressed(){
+  Serial.print(1);
+  pinMode(LED_PIN_A, OUTPUT);
+  pinMode(LED_PIN_B, OUTPUT);
+  pinMode(LED_PIN_C, INPUT);
+  digitalWrite(LED_PIN_A, HIGH);
+  digitalWrite(LED_PIN_B, LOW);
+  digitalWrite(LED_PIN_C, LOW);
+}
+
+void onButton2Pressed(){
+  Serial.print(3);
+  pinMode(LED_PIN_A, INPUT);
+  pinMode(LED_PIN_B, OUTPUT);
+  pinMode(LED_PIN_C, OUTPUT);
+  digitalWrite(LED_PIN_A, LOW);
+  digitalWrite(LED_PIN_B, LOW);
+  digitalWrite(LED_PIN_C, HIGH);
+}
+ 
+void onButton3Pressed(){
+  Serial.print(2);
+  pinMode(LED_PIN_A, OUTPUT);
+  pinMode(LED_PIN_B, OUTPUT);
+  pinMode(LED_PIN_C, INPUT);
+  digitalWrite(LED_PIN_A, LOW);
+  digitalWrite(LED_PIN_B, HIGH);
+  digitalWrite(LED_PIN_C, LOW);
+}
+
+void onButton4Pressed(){
+  Serial.print(4);
+  pinMode(LED_PIN_A, INPUT);
+  pinMode(LED_PIN_B, OUTPUT);
+  pinMode(LED_PIN_C, OUTPUT);
+  digitalWrite(LED_PIN_A, LOW);
+  digitalWrite(LED_PIN_B, HIGH);
+  digitalWrite(LED_PIN_C, LOW);
+}
+
+
+
 // -------------------------------------------------------------------------
 // Setup
 // -------------------------------------------------------------------------
@@ -36,6 +124,16 @@ void setup(void) {
 
   randomSeed(analogRead(0));
 
+  button1.begin();
+  button2.begin();
+  button3.begin();
+  button4.begin();
+
+  button1.onPressed(onButton1Pressed);
+  button2.onPressed(onButton2Pressed);
+  button3.onPressed(onButton3Pressed);
+  button4.onPressed(onButton4Pressed);
+
   face.createSprite(tft.width(), tft.height());
 
   // face.loadFont(NotoSansBold15);
@@ -43,9 +141,13 @@ void setup(void) {
   badges.str2 = 30;
   badges.str3 = 60;
   badges.str4 = 80;
-  
 
-  renderRadar();
+  //renderRadar();
+
+
+  drawSplash();
+  delay(3000);
+
 }
 
 char *names[] = { 
@@ -69,20 +171,6 @@ int find_name(char *name) {
   return -1;
 }
 
-void led_1(){
-  // charlieplexing
-  pinMode(LED_PIN_A, OUTPUT);
-  pinMode(LED_PIN_B, OUTPUT);
-  digitalWrite(LED_PIN_A, HIGH);
-  digitalWrite(LED_PIN_B, LOW);
-}
- 
-void led_2(){
-  pinMode(LED_PIN_A, OUTPUT);
-  pinMode(LED_PIN_B, OUTPUT);
-  digitalWrite(LED_PIN_A, LOW);
-  digitalWrite(LED_PIN_B, HIGH);
-}
 
 
 // On startup, ask for user name, pick from list. 
@@ -141,6 +229,16 @@ void renderRadar()
 void loop()
 {
 
+  // Read buttons on each loop
+  // TODO: do we want to make this a state machine style thing with callbacks
+  // Can we use interrupts? probably yes on all gpio.
+  // See: https://github.com/evert-arias/EasyButton/blob/main/examples/Interrupts/Interrupts.ino#L31
+  // So do we want a state machine???
+  button1.read();
+  button2.read();
+  button3.read();
+  button4.read();
+
   // Get signal strengths here
   badges.str1 = random(0, 120);
   badges.str2 = random(0, 120);
@@ -148,11 +246,16 @@ void loop()
   badges.str4 = random(0, 120);
   
   renderRadar();
-  delay(100);
-  led_1();
-  delay(100);
-  led_2();
 
+}
+
+void drawSplash() {
+  int16_t rc = png.openFLASH((uint8_t *)screwdriver, sizeof(screwdriver), pngDraw);
+  if (rc == PNG_SUCCESS) {
+    tft.startWrite();
+    rc = png.decode(NULL, 0);
+    tft.endWrite();
+  }
 }
 
 // =========================================================================
@@ -167,5 +270,13 @@ void getCoord(int16_t x, int16_t y, float *xp, float *yp, int16_t r, float a)
   float sy1 = sin( (a - 90) * DEG2RAD);
   *xp =  sx1 * r + x;
   *yp =  sy1 * r + y;
+}
+
+// From examples, except that this needs and int return type to work.
+int pngDraw(PNGDRAW *pDraw) {
+  uint16_t lineBuffer[MAX_IMAGE_WIDTH];
+  png.getLineAsRGB565(pDraw, lineBuffer, PNG_RGB565_BIG_ENDIAN, 0xffffffff);
+  tft.pushImage(xpos, ypos + pDraw->y, pDraw->iWidth, 1, lineBuffer);
+  return 1;
 }
 
