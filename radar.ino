@@ -1,7 +1,11 @@
 #include <TFT_eSPI.h>
 #include <EasyButton.h>
-#include <PNGdec.h>
 
+#undef local
+#include <NimBLEDevice.h>
+#define local static
+
+#include <PNGdec.h>
 #include "NotoSansBold15.h"
 #include "screwdriver.h"
 
@@ -62,16 +66,23 @@ EasyButton button2(SW_PIN_B);
 EasyButton button3(SW_PIN_C);
 EasyButton button4(SW_PIN_D);
 
-// TODO: how to scan and store all these.
-struct btle_readings {
-  char name[10]; // my name - can we select this from a list on startup? 
-  uint16_t str1;
-  uint16_t str2;
-  uint16_t str3;
-  uint16_t str4;
+#define MAX_DEVICES 5
+#define SCAN_INTERVAL_MS 2000
+#define BADGE_NAME_PREFIX "Wukkta25-Badge"
+
+struct BLEDeviceInfo {
+  String address;
+  String name;
+  int rssi;
+  unsigned long lastSeen;
 };
 
-struct btle_readings badges;
+BLEDeviceInfo discoveredDevices[MAX_DEVICES];
+int deviceCount = 0;
+unsigned long lastScanTime = 0;
+
+NimBLEScan* pBLEScan;
+NimBLEAdvertising* pAdvertising;
 
 void button1ISR() {
   // See: https://github.com/evert-arias/EasyButton/blob/main/examples/Interrupts/Interrupts.ino#L31
@@ -126,7 +137,45 @@ void onButton4Pressed(){
   digitalWrite(LED_PIN_C, LOW);
 }
 
-
+void processBLEDevice(const NimBLEAdvertisedDevice* advertisedDevice) {
+  String address = advertisedDevice->getAddress().toString().c_str();
+  String name = advertisedDevice->haveName() ? advertisedDevice->getName().c_str() : "";
+  int rssi = advertisedDevice->getRSSI();
+  unsigned long now = millis();
+  
+  if (!name.startsWith(BADGE_NAME_PREFIX)) {
+    return;
+  }
+  
+  int existingIndex = -1;
+  for (int i = 0; i < deviceCount; i++) {
+    if (discoveredDevices[i].address == address) {
+      existingIndex = i;
+      break;
+    }
+  }
+  
+  if (existingIndex >= 0) {
+    discoveredDevices[existingIndex].rssi = rssi;
+    discoveredDevices[existingIndex].lastSeen = now;
+    if (name.length() > 0) {
+      discoveredDevices[existingIndex].name = name;
+    }
+  } else if (deviceCount < MAX_DEVICES) {
+    discoveredDevices[deviceCount].address = address;
+    discoveredDevices[deviceCount].name = name;
+    discoveredDevices[deviceCount].rssi = rssi;
+    discoveredDevices[deviceCount].lastSeen = now;
+    deviceCount++;
+    
+    if (debug) {
+      Serial.printf("New badge found: %s (%s) RSSI: %d\n", 
+                    address.c_str(), 
+                    name.c_str(), 
+                    rssi);
+    }
+  }
+}
 
 // -------------------------------------------------------------------------
 // Setup
@@ -137,6 +186,19 @@ void setup(void) {
   tft.init();
 
   randomSeed(analogRead(0));
+
+  NimBLEDevice::init("Wukkta25-Badge");
+  
+  pAdvertising = NimBLEDevice::getAdvertising();
+  pAdvertising->start();
+  
+  pBLEScan = NimBLEDevice::getScan();
+  pBLEScan->setActiveScan(true);
+  pBLEScan->setInterval(1349);
+  pBLEScan->setWindow(449);
+  pBLEScan->setDuplicateFilter(false);
+  
+  Serial.println("BLE Advertising and Scanning initialized");
 
   button1.begin();
   button2.begin();
@@ -163,15 +225,6 @@ void setup(void) {
 
 
   face.createSprite(tft.width(), tft.height());
-
-  // face.loadFont(NotoSansBold15);
-  badges.str1 = 100;
-  badges.str2 = 30;
-  badges.str3 = 60;
-  badges.str4 = 80;
-
-  //renderRadar();
-
 
   drawSplash();
   delay(3000);
@@ -207,27 +260,30 @@ int find_name(char *name) {
 // TODO: scan for bluetooth devices (badges) and plot strengths
 // ideally with the smae device in each sector, and the top sector empty, for other info.
 // TODO: work out what signal strength looks like, then map from 0 to 120
+int mapRSSI(int rssi) {
+  return map(constrain(rssi, -100, -30), -100, -30, 0, 120);
+}
+
 void renderRadar()
 {
-
   face.fillSprite(TFT_BLACK);
 
   uint32_t radius = 0;
-  float xp = 0.0, yp = 0.0; // Use float pixel position for smooth AA
+  float xp = 0.0, yp = 0.0;
 
-  getCoord(CX, CY, &xp, &yp, 35, 0);
-  face.drawSmoothArc(CX, CY, badges.str1, 0, 0, 72, TFT_RED, TFT_BLACK);
-
-  getCoord(CX, CY, &xp, &yp, 35, 0);
-  face.drawSmoothArc(CX, CY, badges.str2, 0, 72, 144, TFT_BLUE, TFT_BLACK);
-
-  // Skip middle slice
-
-  getCoord(CX, CY, &xp, &yp, 35, 0);
-  face.drawSmoothArc(CX, CY, badges.str3, 0, 216, 288, TFT_RED, TFT_BLACK);
-
-  getCoord(CX, CY, &xp, &yp, 35, 0);
-  face.drawSmoothArc(CX, CY, badges.str4, 0, 288, 360, TFT_BLUE, TFT_BLACK);
+  for (int i = 0; i < min(deviceCount, 4); i++) {
+    int arcRadius = mapRSSI(discoveredDevices[i].rssi);
+    uint16_t color = (i % 2 == 0) ? TFT_RED : TFT_BLUE;
+    int startAngle = i * 72;
+    int endAngle = startAngle + 72;
+    
+    if (i >= 2) {
+      startAngle += 72;
+      endAngle += 72;
+    }
+    
+    face.drawSmoothArc(CX, CY, arcRadius, 0, startAngle, endAngle, color, TFT_BLACK);
+  }
 
   radius = 0;
   while(radius < CX) {
@@ -239,12 +295,6 @@ void renderRadar()
     getCoord(CX, CY, &xp, &yp, FACE_W, angle + 36);
     face.drawWideLine(CX, CY, xp, yp, 3, radar_fg, TFT_BLACK);
   }
-
-  // Sweep
-  // getCoord(CX, CY, &xp, &yp, FACE_W, trace);
-  // face.drawWideLine(CX, CY, xp, yp, 3, radar_fg, TFT_BLACK);
-  // trace += 2;
- 
   
   face.setTextColor(TFT_WHITE, TFT_BLACK);
   face.drawString("Wukkta25", CLOCK_R + 32, CLOCK_R * 0.75);
@@ -256,15 +306,32 @@ void renderRadar()
 // -------------------------------------------------------------------------
 void loop()
 {
-
-  // Get signal strengths here
-  badges.str1 = random(0, 120);
-  badges.str2 = random(0, 120);
-  badges.str3 = random(0, 120);
-  badges.str4 = random(0, 120);
+  unsigned long currentMillis = millis();
+  
+  if (currentMillis - lastScanTime >= SCAN_INTERVAL_MS) {
+    lastScanTime = currentMillis;
+    
+    deviceCount = 0;
+    
+    Serial.println("Starting BLE scan...");
+   
+    NimBLEScan *pScan = NimBLEDevice::getScan();
+    NimBLEScanResults results = pScan->getResults(10 * 1000);
+    
+    Serial.printf("Scan complete. Found %d advertisements\n", results.getCount());
+    
+    for (int i = 0; i < results.getCount(); i++) {
+      const NimBLEAdvertisedDevice* device = results.getDevice(i);
+      processBLEDevice(device);
+    }
+    
+    pBLEScan->clearResults();
+    
+    Serial.printf("Tracking %d unique devices\n", deviceCount);
+  }
   
   renderRadar();
-
+  delay(50);
 }
 
 void drawSplash() {
