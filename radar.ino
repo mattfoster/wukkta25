@@ -10,6 +10,16 @@
 #include "screwdriver.h"
 
 uint8_t debug = 1;
+bool scanningEnabled = true;
+uint8_t displayMode = 0; // 0=radar, 1=bars, 2=detailed
+bool isPinging = false;
+unsigned long pingStartTime = 0;
+#define PING_DURATION_MS 3000
+volatile bool playingAnimation = false;
+volatile int animationStep = 0;
+
+hw_timer_t* animationTimer = NULL;
+portMUX_TYPE timerMux = portMUX_INITIALIZER_UNLOCKED;
 
 // PNG cruft
 PNG png; // PNG decoder instance
@@ -75,6 +85,7 @@ struct BLEDeviceInfo {
   String name;
   int rssi;
   unsigned long lastSeen;
+  bool isPinging;
 };
 
 BLEDeviceInfo discoveredDevices[MAX_DEVICES];
@@ -101,40 +112,108 @@ void button4ISR() {
   button4.read();
 }
 
-void onButton1Pressed() {
-  pinMode(LED_PIN_A, OUTPUT);
-  pinMode(LED_PIN_B, OUTPUT);
+void lightLED(int ledNum) {
+  switch(ledNum) {
+    case 0:
+      pinMode(LED_PIN_A, OUTPUT);
+      pinMode(LED_PIN_B, OUTPUT);
+      pinMode(LED_PIN_C, INPUT);
+      digitalWrite(LED_PIN_A, HIGH);
+      digitalWrite(LED_PIN_B, LOW);
+      digitalWrite(LED_PIN_C, LOW);
+      break;
+    case 1:
+      pinMode(LED_PIN_A, INPUT);
+      pinMode(LED_PIN_B, OUTPUT);
+      pinMode(LED_PIN_C, OUTPUT);
+      digitalWrite(LED_PIN_A, LOW);
+      digitalWrite(LED_PIN_B, LOW);
+      digitalWrite(LED_PIN_C, HIGH);
+      break;
+    case 2:
+      pinMode(LED_PIN_A, OUTPUT);
+      pinMode(LED_PIN_B, OUTPUT);
+      pinMode(LED_PIN_C, INPUT);
+      digitalWrite(LED_PIN_A, LOW);
+      digitalWrite(LED_PIN_B, HIGH);
+      digitalWrite(LED_PIN_C, LOW);
+      break;
+    case 3:
+      pinMode(LED_PIN_A, INPUT);
+      pinMode(LED_PIN_B, OUTPUT);
+      pinMode(LED_PIN_C, OUTPUT);
+      digitalWrite(LED_PIN_A, LOW);
+      digitalWrite(LED_PIN_B, HIGH);
+      digitalWrite(LED_PIN_C, LOW);
+      break;
+  }
+}
+
+void turnOffAllLEDs() {
+  pinMode(LED_PIN_A, INPUT);
+  pinMode(LED_PIN_B, INPUT);
   pinMode(LED_PIN_C, INPUT);
-  digitalWrite(LED_PIN_A, HIGH);
-  digitalWrite(LED_PIN_B, LOW);
-  digitalWrite(LED_PIN_C, LOW);
+}
+
+void IRAM_ATTR onAnimationTimer() {
+  portENTER_CRITICAL_ISR(&timerMux);
+  
+  if (playingAnimation) {
+    int led = animationStep % 4;
+    lightLED(led);
+    
+    animationStep++;
+    
+    // 4 LEDs × 3 cycles = 12 steps
+    if (animationStep >= 12) {
+      playingAnimation = false;
+      turnOffAllLEDs();
+    }
+  }
+  
+  portEXIT_CRITICAL_ISR(&timerMux);
+}
+
+void startPingAnimation() {
+  portENTER_CRITICAL(&timerMux);
+  playingAnimation = true;
+  animationStep = 0;
+  portEXIT_CRITICAL(&timerMux);
+}
+
+void updateAdvertising() {
+  // For now, just track ping state locally
+  // Visual feedback on local display
+  Serial.printf("Ping state: %s\n", isPinging ? "ACTIVE" : "INACTIVE");
+}
+
+void onButton1Pressed() {
+  scanningEnabled = !scanningEnabled;
+  Serial.printf("Scanning %s\n", scanningEnabled ? "ENABLED" : "PAUSED");
 }
 
 void onButton2Pressed(){
-  pinMode(LED_PIN_A, INPUT);
-  pinMode(LED_PIN_B, OUTPUT);
-  pinMode(LED_PIN_C, OUTPUT);
-  digitalWrite(LED_PIN_A, LOW);
-  digitalWrite(LED_PIN_B, LOW);
-  digitalWrite(LED_PIN_C, HIGH);
+  displayMode = (displayMode + 1) % 3;
+  const char* modes[] = {"RADAR", "BARS", "DETAILED"};
+  Serial.printf("Display mode: %s\n", modes[displayMode]);
 }
  
 void onButton3Pressed(){
-  pinMode(LED_PIN_A, OUTPUT);
-  pinMode(LED_PIN_B, OUTPUT);
-  pinMode(LED_PIN_C, INPUT);
-  digitalWrite(LED_PIN_A, LOW);
-  digitalWrite(LED_PIN_B, HIGH);
-  digitalWrite(LED_PIN_C, LOW);
+  deviceCount = 0;
+  Serial.println("Device list cleared");
+}
+
+void onButton3LongPress(){
+  lastScanTime = 0;
+  Serial.println("Forcing immediate scan");
 }
 
 void onButton4Pressed(){
-  pinMode(LED_PIN_A, INPUT);
-  pinMode(LED_PIN_B, OUTPUT);
-  pinMode(LED_PIN_C, OUTPUT);
-  digitalWrite(LED_PIN_A, LOW);
-  digitalWrite(LED_PIN_B, HIGH);
-  digitalWrite(LED_PIN_C, LOW);
+  isPinging = true;
+  pingStartTime = millis();
+  updateAdvertising();
+  Serial.println("PING sent!");
+  startPingAnimation();
 }
 
 void processBLEDevice(const NimBLEAdvertisedDevice* advertisedDevice) {
@@ -147,6 +226,10 @@ void processBLEDevice(const NimBLEAdvertisedDevice* advertisedDevice) {
     return;
   }
   
+  // For now, disable remote ping detection
+  // Will implement via proper BLE service in future
+  bool deviceIsPinging = false;
+  
   int existingIndex = -1;
   for (int i = 0; i < deviceCount; i++) {
     if (discoveredDevices[i].address == address) {
@@ -158,6 +241,7 @@ void processBLEDevice(const NimBLEAdvertisedDevice* advertisedDevice) {
   if (existingIndex >= 0) {
     discoveredDevices[existingIndex].rssi = rssi;
     discoveredDevices[existingIndex].lastSeen = now;
+    discoveredDevices[existingIndex].isPinging = deviceIsPinging;
     if (name.length() > 0) {
       discoveredDevices[existingIndex].name = name;
     }
@@ -166,6 +250,7 @@ void processBLEDevice(const NimBLEAdvertisedDevice* advertisedDevice) {
     discoveredDevices[deviceCount].name = name;
     discoveredDevices[deviceCount].rssi = rssi;
     discoveredDevices[deviceCount].lastSeen = now;
+    discoveredDevices[deviceCount].isPinging = deviceIsPinging;
     deviceCount++;
     
     if (debug) {
@@ -174,6 +259,10 @@ void processBLEDevice(const NimBLEAdvertisedDevice* advertisedDevice) {
                     name.c_str(), 
                     rssi);
     }
+  }
+  
+  if (deviceIsPinging && debug) {
+    Serial.printf(">>> %s is PINGING! <<<\n", name.c_str());
   }
 }
 
@@ -186,6 +275,14 @@ void setup(void) {
   tft.init();
 
   randomSeed(analogRead(0));
+  
+  // Setup timer for LED animation - 80ms interval
+  // Prescaler 80: 80MHz / 80 = 1MHz (1 tick = 1 microsecond)
+  // 80ms = 80,000 microseconds = 80,000 ticks
+  animationTimer = timerBegin(0, 80, true);
+  timerAttachInterrupt(animationTimer, &onAnimationTimer, true);
+  timerAlarmWrite(animationTimer, 80000, true);
+  timerAlarmEnable(animationTimer);
 
   NimBLEDevice::init("Wukkta25-Badge");
   
@@ -208,6 +305,7 @@ void setup(void) {
   button1.onPressed(onButton1Pressed);
   button2.onPressed(onButton2Pressed);
   button3.onPressed(onButton3Pressed);
+  button3.onPressedFor(1000, onButton3LongPress);
   button4.onPressed(onButton4Pressed);
 
   if (button1.supportsInterrupt()) {
@@ -273,7 +371,7 @@ void renderRadar()
 
   for (int i = 0; i < min(deviceCount, 4); i++) {
     int arcRadius = mapRSSI(discoveredDevices[i].rssi);
-    uint16_t color = (i % 2 == 0) ? TFT_RED : TFT_BLUE;
+    uint16_t color = discoveredDevices[i].isPinging ? TFT_YELLOW : ((i % 2 == 0) ? TFT_RED : TFT_BLUE);
     int startAngle = i * 72;
     int endAngle = startAngle + 72;
     
@@ -297,18 +395,101 @@ void renderRadar()
   }
   
   face.setTextColor(TFT_WHITE, TFT_BLACK);
-  face.drawString("Wukkta25", CLOCK_R + 32, CLOCK_R * 0.75);
+  face.drawString(scanningEnabled ? "SCANNING" : "PAUSED", 30, CLOCK_R * 0.75);
 
   face.pushSprite(0, 0, TFT_TRANSPARENT);
+}
+
+void renderBars()
+{
+  face.fillSprite(TFT_BLACK);
+  face.setTextColor(TFT_WHITE, TFT_BLACK);
+  face.setTextSize(1);
+  
+  face.drawString("SIGNAL BARS", 60, 15);
+  
+  int y = 45;
+  int barHeight = 15;
+  int spacing = 20;
+  
+  for (int i = 0; i < min(deviceCount, 5); i++) {
+    int barWidth = map(constrain(discoveredDevices[i].rssi, -100, -30), -100, -30, 0, 100);
+    uint16_t color = discoveredDevices[i].isPinging ? TFT_YELLOW : TFT_GREEN;
+    
+    face.fillRect(50, y, barWidth, barHeight, color);
+    face.drawRect(50, y, 100, barHeight, TFT_WHITE);
+    
+    face.drawString(String(discoveredDevices[i].rssi) + "dBm", 165, y + 3);
+    
+    y += spacing;
+  }
+  
+  face.pushSprite(0, 0);
+}
+
+void renderDetailed()
+{
+  face.fillSprite(TFT_BLACK);
+  
+  if (deviceCount > 0) {
+    static int detailedIndex = 0;
+    if (detailedIndex >= deviceCount) detailedIndex = 0;
+    
+    uint16_t color = discoveredDevices[detailedIndex].isPinging ? TFT_YELLOW : TFT_GREEN;
+    
+    // Center text for round display - use CX and CY from radar
+    int centerY = CY - 20;
+    
+    face.setTextColor(color, TFT_BLACK);
+    face.setTextSize(1);
+    face.drawString(discoveredDevices[detailedIndex].name, 20, centerY);
+    
+    face.setTextColor(TFT_WHITE, TFT_BLACK);
+    face.drawString("RSSI: " + String(discoveredDevices[detailedIndex].rssi) + " dBm", 20, centerY + 20);
+    
+    if (discoveredDevices[detailedIndex].isPinging) {
+      face.setTextColor(TFT_YELLOW, TFT_BLACK);
+      face.drawString("** PINGING **", 25, centerY + 40);
+    }
+    
+    detailedIndex = (detailedIndex + 1) % deviceCount;
+  } else {
+    face.setTextColor(TFT_WHITE, TFT_BLACK);
+    face.setTextSize(1);
+    face.drawString("No devices", 30, CY);
+  }
+  
+  face.pushSprite(0, 0);
+}
+
+void renderDisplay() {
+  switch(displayMode) {
+    case 0: renderRadar(); break;
+    case 1: renderBars(); break;
+    case 2: renderDetailed(); break;
+  }
 }
 // -------------------------------------------------------------------------
 // Main loop
 // -------------------------------------------------------------------------
 void loop()
 {
+  button1.read();
+  button2.read();
+  button3.read();
+  button4.read();
+  
   unsigned long currentMillis = millis();
   
-  if (currentMillis - lastScanTime >= SCAN_INTERVAL_MS) {
+  // Handle ping timeout
+  if (isPinging && (currentMillis - pingStartTime >= PING_DURATION_MS)) {
+    isPinging = false;
+    updateAdvertising();
+    Serial.println("Ping ended");
+  }
+  
+  // Perform scanning
+  if (scanningEnabled && (currentMillis - lastScanTime >= SCAN_INTERVAL_MS)) {
     lastScanTime = currentMillis;
     
     deviceCount = 0;
@@ -330,8 +511,7 @@ void loop()
     Serial.printf("Tracking %d unique devices\n", deviceCount);
   }
   
-  renderRadar();
-  delay(50);
+  renderDisplay();
 }
 
 void drawSplash() {
