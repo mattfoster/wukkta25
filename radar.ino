@@ -17,6 +17,7 @@ unsigned long pingStartTime = 0;
 #define PING_DURATION_MS 3000
 volatile bool playingAnimation = false;
 volatile int animationStep = 0;
+bool showPingImage = false;
 
 hw_timer_t* animationTimer = NULL;
 portMUX_TYPE timerMux = portMUX_INITIALIZER_UNLOCKED;
@@ -208,12 +209,28 @@ void onButton3LongPress(){
   Serial.println("Forcing immediate scan");
 }
 
+int currentImage = 0;
+
+void displayPingImage() {
+  const byte* images[] = {screwdriver, coin, camera, puffa, sw};
+  const int imageSizes[] = {sizeof(screwdriver), sizeof(coin), sizeof(camera), sizeof(puffa), sizeof(sw)};
+  const char* imageNames[] = {"screwdriver", "coin", "camera", "puffa", "sw"};
+  
+  int16_t rc = png.openFLASH((uint8_t *)images[currentImage], imageSizes[currentImage], pngDraw);
+  if (rc == PNG_SUCCESS) {
+    tft.startWrite();
+    rc = png.decode(NULL, 0);
+    tft.endWrite();
+    Serial.printf("Displaying: %s\n", imageNames[currentImage]);
+  }
+  
+  delay(1000);
+  
+  currentImage = (currentImage + 1) % 5;
+}
+
 void onButton4Pressed(){
-  isPinging = true;
-  pingStartTime = millis();
-  updateAdvertising();
-  Serial.println("PING sent!");
-  startPingAnimation();
+  showPingImage = true;
 }
 
 void processBLEDevice(const NimBLEAdvertisedDevice* advertisedDevice) {
@@ -395,7 +412,8 @@ void renderRadar()
   }
   
   face.setTextColor(TFT_WHITE, TFT_BLACK);
-  face.drawString(scanningEnabled ? "SCANNING" : "PAUSED", 30, CLOCK_R * 0.75);
+  face.drawString("WUKKTA25", 95, CLOCK_R * 0.70);
+  face.drawString(scanningEnabled ? "SCANNING" : "PAUSED", 95, CLOCK_R * 0.75);
 
   face.pushSprite(0, 0, TFT_TRANSPARENT);
 }
@@ -479,6 +497,18 @@ void loop()
   button3.read();
   button4.read();
   
+  // Handle ping image display
+  if (showPingImage) {
+    showPingImage = false;
+    isPinging = true;
+    pingStartTime = millis();
+    updateAdvertising();
+    Serial.println("PING sent!");
+    
+    displayPingImage();
+    startPingAnimation();
+  }
+  
   unsigned long currentMillis = millis();
   
   // Handle ping timeout
@@ -516,6 +546,8 @@ void loop()
 
 void drawSplash() {
   int16_t rc = png.openFLASH((uint8_t *)screwdriver, sizeof(screwdriver), pngDraw);
+  //int16_t rc = png.openFLASH((uint8_t *)sw, sizeof(sw), pngDraw);
+
   if (rc == PNG_SUCCESS) {
     tft.startWrite();
     rc = png.decode(NULL, 0);
