@@ -19,6 +19,10 @@ volatile bool playingAnimation = false;
 volatile int animationStep = 0;
 bool showPingImage = false;
 
+bool displayDirty = true;
+unsigned long lastDisplayUpdate = 0;
+#define DISPLAY_UPDATE_INTERVAL 50  // 20 FPS
+
 hw_timer_t* animationTimer = NULL;
 portMUX_TYPE timerMux = portMUX_INITIALIZER_UNLOCKED;
 
@@ -95,6 +99,53 @@ unsigned long lastScanTime = 0;
 
 NimBLEScan* pBLEScan;
 NimBLEAdvertising* pAdvertising;
+
+class ScanCallbacks: public NimBLEScanCallbacks {
+  void onResult(NimBLEAdvertisedDevice* advertisedDevice) {
+    String address = advertisedDevice->getAddress().toString().c_str();
+    String name = advertisedDevice->haveName() ? advertisedDevice->getName().c_str() : "";
+    int rssi = advertisedDevice->getRSSI();
+    
+    if (!name.startsWith(BADGE_NAME_PREFIX)) return;
+    
+    unsigned long now = millis();
+    int existingIndex = -1;
+    
+    for (int i = 0; i < deviceCount; i++) {
+      if (discoveredDevices[i].address == address) {
+        existingIndex = i;
+        break;
+      }
+    }
+    
+    if (existingIndex >= 0) {
+      discoveredDevices[existingIndex].rssi = rssi;
+      discoveredDevices[existingIndex].lastSeen = now;
+      if (name.length() > 0) {
+        discoveredDevices[existingIndex].name = name;
+      }
+    } else if (deviceCount < MAX_DEVICES) {
+      discoveredDevices[deviceCount].address = address;
+      discoveredDevices[deviceCount].name = name;
+      discoveredDevices[deviceCount].rssi = rssi;
+      discoveredDevices[deviceCount].lastSeen = now;
+      discoveredDevices[deviceCount].isPinging = false;
+      deviceCount++;
+      
+      if (debug) {
+        Serial.printf("New badge: %s (%s) RSSI: %d\n", address.c_str(), name.c_str(), rssi);
+      }
+    }
+    displayDirty = true;
+  }
+  
+  void onScanEnd(NimBLEScanResults results) {
+    Serial.printf("Scan cycle complete. Tracking %d badges\n", deviceCount);
+    if (scanningEnabled) {
+      pBLEScan->start(2, false);
+    }
+  }
+};
 
 void button1ISR() {
   // See: https://github.com/evert-arias/EasyButton/blob/main/examples/Interrupts/Interrupts.ino#L31
@@ -190,23 +241,36 @@ void updateAdvertising() {
 
 void onButton1Pressed() {
   scanningEnabled = !scanningEnabled;
-  Serial.printf("Scanning %s\n", scanningEnabled ? "ENABLED" : "PAUSED");
+  displayDirty = true;
+  
+  if (scanningEnabled) {
+    pBLEScan->start(2, false);
+    Serial.println("Scanning ENABLED");
+  } else {
+    pBLEScan->stop();
+    Serial.println("Scanning PAUSED");
+  }
 }
 
 void onButton2Pressed(){
   displayMode = (displayMode + 1) % 3;
+  displayDirty = true;
   const char* modes[] = {"RADAR", "BARS", "DETAILED"};
   Serial.printf("Display mode: %s\n", modes[displayMode]);
 }
  
 void onButton3Pressed(){
   deviceCount = 0;
+  displayDirty = true;
   Serial.println("Device list cleared");
 }
 
 void onButton3LongPress(){
-  lastScanTime = 0;
-  Serial.println("Forcing immediate scan");
+  if (scanningEnabled) {
+    pBLEScan->stop();
+    pBLEScan->start(2, false);
+  }
+  Serial.println("Forcing immediate rescan");
 }
 
 int currentImage = 0;
@@ -307,12 +371,15 @@ void setup(void) {
   pAdvertising->start();
   
   pBLEScan = NimBLEDevice::getScan();
+  pBLEScan->setScanCallbacks(new ScanCallbacks());
   pBLEScan->setActiveScan(true);
   pBLEScan->setInterval(1349);
   pBLEScan->setWindow(449);
   pBLEScan->setDuplicateFilter(false);
   
   Serial.println("BLE Advertising and Scanning initialized");
+  
+  pBLEScan->start(2, false);
 
   button1.begin();
   button2.begin();
@@ -344,27 +411,6 @@ void setup(void) {
   drawSplash();
   delay(3000);
 
-}
-
-char *names[] = { 
-  "feroz",
-  "matt",
-  "niko",
-  "paul",
-  "will"
-};
-
-int name_count = sizeof(names) / sizeof(names[0]);
-
-// Find the index for a given name
-int find_name(char *name) {
-  for (uint8_t ii = 0; ii < name_count; ii++) {
-    if (!strcmp(names[ii], name)) {
-      return ii;
-    }
-  }
-
-  return -1;
 }
 
 
@@ -518,30 +564,12 @@ void loop()
     Serial.println("Ping ended");
   }
   
-  // Perform scanning
-  if (scanningEnabled && (currentMillis - lastScanTime >= SCAN_INTERVAL_MS)) {
-    lastScanTime = currentMillis;
-    
-    deviceCount = 0;
-    
-    Serial.println("Starting BLE scan...");
-   
-    NimBLEScan *pScan = NimBLEDevice::getScan();
-    NimBLEScanResults results = pScan->getResults(10 * 1000);
-    
-    Serial.printf("Scan complete. Found %d advertisements\n", results.getCount());
-    
-    for (int i = 0; i < results.getCount(); i++) {
-      const NimBLEAdvertisedDevice* device = results.getDevice(i);
-      processBLEDevice(device);
-    }
-    
-    pBLEScan->clearResults();
-    
-    Serial.printf("Tracking %d unique devices\n", deviceCount);
+  // Only update display at max 20 FPS when dirty
+  if (displayDirty && (currentMillis - lastDisplayUpdate >= DISPLAY_UPDATE_INTERVAL)) {
+    renderDisplay();
+    displayDirty = false;
+    lastDisplayUpdate = currentMillis;
   }
-  
-  renderDisplay();
 }
 
 void drawSplash() {
