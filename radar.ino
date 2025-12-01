@@ -11,17 +11,42 @@
 
 uint8_t debug = 1;
 bool scanningEnabled = true;
-uint8_t displayMode = 0; // 0=radar, 1=bars, 2=detailed
+uint8_t displayMode = 0; // 0=radar, 1=bars, 2=detailed, 3=credits
 bool isPinging = false;
 unsigned long pingStartTime = 0;
 #define PING_DURATION_MS 3000
+bool scanningWasPausedBeforePing = false;
 volatile bool playingAnimation = false;
 volatile int animationStep = 0;
 bool showPingImage = false;
+bool showBadgeImage = false;
+int badgeImageIndex = 0;
+unsigned long badgeImageStartTime = 0;
+#define BADGE_IMAGE_DURATION 2000
 
 bool displayDirty = true;
 unsigned long lastDisplayUpdate = 0;
 #define DISPLAY_UPDATE_INTERVAL 50  // 20 FPS
+
+int activeLED = -1;
+unsigned long ledStartTime = 0;
+#define LED_DURATION_MS 150
+
+bool pausedLEDState = false;
+unsigned long lastPausedFlashTime = 0;
+#define PAUSED_FLASH_INTERVAL 500
+
+bool lightDisplayMode = false;
+int lightDisplayStep = 0;
+unsigned long lastLightDisplayUpdate = 0;
+#define LIGHT_DISPLAY_INTERVAL 100
+
+bool scanInProgress = false;
+unsigned long scanStartTime = 0;
+#define SCAN_DURATION_MS 10000
+
+volatile bool button1Action = false;
+volatile bool button3LongAction = false;
 
 hw_timer_t* animationTimer = NULL;
 portMUX_TYPE timerMux = portMUX_INITIALIZER_UNLOCKED;
@@ -82,7 +107,6 @@ EasyButton button3(SW_PIN_C);
 EasyButton button4(SW_PIN_D);
 
 #define MAX_DEVICES 5
-#define SCAN_INTERVAL_MS 2000
 #define BADGE_NAME_PREFIX "Wukkta25-Badge"
 
 struct BLEDeviceInfo {
@@ -95,55 +119,76 @@ struct BLEDeviceInfo {
 
 BLEDeviceInfo discoveredDevices[MAX_DEVICES];
 int deviceCount = 0;
-unsigned long lastScanTime = 0;
 
 NimBLEScan* pBLEScan;
 NimBLEAdvertising* pAdvertising;
 
-class ScanCallbacks: public NimBLEScanCallbacks {
-  void onResult(NimBLEAdvertisedDevice* advertisedDevice) {
-    String address = advertisedDevice->getAddress().toString().c_str();
-    String name = advertisedDevice->haveName() ? advertisedDevice->getName().c_str() : "";
-    int rssi = advertisedDevice->getRSSI();
-    
-    if (!name.startsWith(BADGE_NAME_PREFIX)) return;
-    
-    unsigned long now = millis();
-    int existingIndex = -1;
-    
-    for (int i = 0; i < deviceCount; i++) {
-      if (discoveredDevices[i].address == address) {
-        existingIndex = i;
-        break;
-      }
-    }
-    
-    if (existingIndex >= 0) {
-      discoveredDevices[existingIndex].rssi = rssi;
-      discoveredDevices[existingIndex].lastSeen = now;
-      if (name.length() > 0) {
-        discoveredDevices[existingIndex].name = name;
-      }
-    } else if (deviceCount < MAX_DEVICES) {
-      discoveredDevices[deviceCount].address = address;
-      discoveredDevices[deviceCount].name = name;
-      discoveredDevices[deviceCount].rssi = rssi;
-      discoveredDevices[deviceCount].lastSeen = now;
-      discoveredDevices[deviceCount].isPinging = false;
-      deviceCount++;
-      
-      if (debug) {
-        Serial.printf("New badge: %s (%s) RSSI: %d\n", address.c_str(), name.c_str(), rssi);
-      }
-    }
-    displayDirty = true;
+class MyScanCallbacks: public NimBLEScanCallbacks {
+  void onResult(const NimBLEAdvertisedDevice* advertisedDevice) {
+  String address = advertisedDevice->getAddress().toString().c_str();
+  String name = advertisedDevice->haveName() ? advertisedDevice->getName().c_str() : "";
+  int rssi = advertisedDevice->getRSSI();
+  
+  if (debug) {
+    Serial.printf("Found device: %s (%s) RSSI: %d\n", address.c_str(), name.c_str(), rssi);
   }
   
-  void onScanEnd(NimBLEScanResults results) {
-    Serial.printf("Scan cycle complete. Tracking %d badges\n", deviceCount);
-    if (scanningEnabled) {
-      pBLEScan->start(2, false);
+  if (!name.startsWith(BADGE_NAME_PREFIX)) return;
+  
+  unsigned long now = millis();
+  int existingIndex = -1;
+  
+  for (int i = 0; i < deviceCount; i++) {
+    if (discoveredDevices[i].address == address) {
+      existingIndex = i;
+      break;
     }
+  }
+  
+  if (existingIndex >= 0) {
+    discoveredDevices[existingIndex].rssi = rssi;
+    discoveredDevices[existingIndex].lastSeen = now;
+    if (name.length() > 0) {
+      discoveredDevices[existingIndex].name = name;
+    }
+  } else if (deviceCount < MAX_DEVICES) {
+    discoveredDevices[deviceCount].address = address;
+    discoveredDevices[deviceCount].name = name;
+    discoveredDevices[deviceCount].rssi = rssi;
+    discoveredDevices[deviceCount].lastSeen = now;
+    discoveredDevices[deviceCount].isPinging = false;
+    deviceCount++;
+    
+    if (debug) {
+      Serial.printf("New badge: %s (%s) RSSI: %d\n", address.c_str(), name.c_str(), rssi);
+    }
+    
+    // Trigger image display for specific badge names
+    if (name.indexOf("feroz") >= 0 || name.indexOf("Feroz") >= 0) {
+      showBadgeImage = true;
+      badgeImageIndex = 3; // puffa
+    } else if (name.indexOf("niko") >= 0 || name.indexOf("Niko") >= 0) {
+      showBadgeImage = true;
+      badgeImageIndex = 2; // camera
+    } else if (name.indexOf("paul") >= 0 || name.indexOf("Paul") >= 0) {
+      showBadgeImage = true;
+      badgeImageIndex = 1; // coin
+    } else if (name.indexOf("will") >= 0 || name.indexOf("Will") >= 0) {
+      showBadgeImage = true;
+      badgeImageIndex = 4; // switch
+    } else if (name.indexOf("matt") >= 0 || name.indexOf("Matt") >= 0) {
+      showBadgeImage = true;
+      badgeImageIndex = 0; // scredriver
+    }
+  }
+  displayDirty = true;
+  }
+  
+  void onScanEnd(const NimBLEScanResults& results, int reason) {
+    Serial.printf("*** Scan complete. Reason: %d, Found %d total ads, Tracking %d badges ***\n", reason, results.getCount(), deviceCount);
+    scanInProgress = false;
+    displayDirty = true;
+    delay(500); // Small delay before next scan
   }
 };
 
@@ -164,7 +209,7 @@ void button4ISR() {
   button4.read();
 }
 
-void lightLED(int ledNum) {
+void IRAM_ATTR lightLED(int ledNum) {
   switch(ledNum) {
     case 0:
       pinMode(LED_PIN_A, OUTPUT);
@@ -201,15 +246,13 @@ void lightLED(int ledNum) {
   }
 }
 
-void turnOffAllLEDs() {
+void IRAM_ATTR turnOffAllLEDs() {
   pinMode(LED_PIN_A, INPUT);
   pinMode(LED_PIN_B, INPUT);
   pinMode(LED_PIN_C, INPUT);
 }
 
 void IRAM_ATTR onAnimationTimer() {
-  portENTER_CRITICAL_ISR(&timerMux);
-  
   if (playingAnimation) {
     int led = animationStep % 4;
     lightLED(led);
@@ -222,8 +265,6 @@ void IRAM_ATTR onAnimationTimer() {
       turnOffAllLEDs();
     }
   }
-  
-  portEXIT_CRITICAL_ISR(&timerMux);
 }
 
 void startPingAnimation() {
@@ -240,37 +281,42 @@ void updateAdvertising() {
 }
 
 void onButton1Pressed() {
-  scanningEnabled = !scanningEnabled;
-  displayDirty = true;
-  
-  if (scanningEnabled) {
-    pBLEScan->start(2, false);
-    Serial.println("Scanning ENABLED");
-  } else {
-    pBLEScan->stop();
-    Serial.println("Scanning PAUSED");
-  }
+  button1Action = true;
 }
 
 void onButton2Pressed(){
-  displayMode = (displayMode + 1) % 3;
+  Serial.println("B2");
+  displayMode = (displayMode + 1) % 4;
   displayDirty = true;
-  const char* modes[] = {"RADAR", "BARS", "DETAILED"};
+  
+  if (!playingAnimation) {
+    activeLED = 1;
+    ledStartTime = millis();
+    lightLED(1);
+  }
+  
+  const char* modes[] = {"RADAR", "BARS", "DETAILED", "CREDITS"};
   Serial.printf("Display mode: %s\n", modes[displayMode]);
 }
  
 void onButton3Pressed(){
-  deviceCount = 0;
+  lightDisplayMode = !lightDisplayMode;
   displayDirty = true;
-  Serial.println("Device list cleared");
-}
-
-void onButton3LongPress(){
-  if (scanningEnabled) {
-    pBLEScan->stop();
-    pBLEScan->start(2, false);
+  
+  if (lightDisplayMode) {
+    lightDisplayStep = 0;
+    lastLightDisplayUpdate = millis();
+    Serial.println("Light display STARTED");
+  } else {
+    turnOffAllLEDs();
+    Serial.println("Light display STOPPED");
+    
+    if (!playingAnimation) {
+      activeLED = 2;
+      ledStartTime = millis();
+      lightLED(2);
+    }
   }
-  Serial.println("Forcing immediate rescan");
 }
 
 int currentImage = 0;
@@ -295,55 +341,11 @@ void displayPingImage() {
 
 void onButton4Pressed(){
   showPingImage = true;
-}
-
-void processBLEDevice(const NimBLEAdvertisedDevice* advertisedDevice) {
-  String address = advertisedDevice->getAddress().toString().c_str();
-  String name = advertisedDevice->haveName() ? advertisedDevice->getName().c_str() : "";
-  int rssi = advertisedDevice->getRSSI();
-  unsigned long now = millis();
   
-  if (!name.startsWith(BADGE_NAME_PREFIX)) {
-    return;
-  }
-  
-  // For now, disable remote ping detection
-  // Will implement via proper BLE service in future
-  bool deviceIsPinging = false;
-  
-  int existingIndex = -1;
-  for (int i = 0; i < deviceCount; i++) {
-    if (discoveredDevices[i].address == address) {
-      existingIndex = i;
-      break;
-    }
-  }
-  
-  if (existingIndex >= 0) {
-    discoveredDevices[existingIndex].rssi = rssi;
-    discoveredDevices[existingIndex].lastSeen = now;
-    discoveredDevices[existingIndex].isPinging = deviceIsPinging;
-    if (name.length() > 0) {
-      discoveredDevices[existingIndex].name = name;
-    }
-  } else if (deviceCount < MAX_DEVICES) {
-    discoveredDevices[deviceCount].address = address;
-    discoveredDevices[deviceCount].name = name;
-    discoveredDevices[deviceCount].rssi = rssi;
-    discoveredDevices[deviceCount].lastSeen = now;
-    discoveredDevices[deviceCount].isPinging = deviceIsPinging;
-    deviceCount++;
-    
-    if (debug) {
-      Serial.printf("New badge found: %s (%s) RSSI: %d\n", 
-                    address.c_str(), 
-                    name.c_str(), 
-                    rssi);
-    }
-  }
-  
-  if (deviceIsPinging && debug) {
-    Serial.printf(">>> %s is PINGING! <<<\n", name.c_str());
+  if (!playingAnimation) {
+    activeLED = 3;
+    ledStartTime = millis();
+    lightLED(3);
   }
 }
 
@@ -365,21 +367,33 @@ void setup(void) {
   timerAlarmWrite(animationTimer, 80000, true);
   timerAlarmEnable(animationTimer);
 
-  NimBLEDevice::init("Wukkta25-Badge");
+  NimBLEDevice::init("Wukkta25-Badge-Matt");
+  
+  // Set up advertising with device name
+  NimBLEAdvertisementData advertisementData;
+  advertisementData.setName("Wukkta25-Badge-Matt");
+  advertisementData.setCompleteServices(NimBLEUUID("FEAD"));
   
   pAdvertising = NimBLEDevice::getAdvertising();
+  pAdvertising->setAdvertisementData(advertisementData);
+  pAdvertising->setMinInterval(0x20);
+  pAdvertising->setMaxInterval(0x40);
   pAdvertising->start();
   
+  Serial.println("========================================");
+  Serial.println("BLE Advertising started");
+  Serial.printf("Name: Wukkta25-Badge-Matt\n");
+  Serial.printf("Address: %s\n", NimBLEDevice::getAddress().toString().c_str());
+  Serial.println("========================================");
+  
   pBLEScan = NimBLEDevice::getScan();
-  pBLEScan->setScanCallbacks(new ScanCallbacks());
+  pBLEScan->setScanCallbacks(new MyScanCallbacks());
   pBLEScan->setActiveScan(true);
   pBLEScan->setInterval(1349);
   pBLEScan->setWindow(449);
   pBLEScan->setDuplicateFilter(false);
   
-  Serial.println("BLE Advertising and Scanning initialized");
-  
-  pBLEScan->start(2, false);
+  Serial.println("BLE Scanning initialized");
 
   button1.begin();
   button2.begin();
@@ -389,7 +403,6 @@ void setup(void) {
   button1.onPressed(onButton1Pressed);
   button2.onPressed(onButton2Pressed);
   button3.onPressed(onButton3Pressed);
-  button3.onPressedFor(1000, onButton3LongPress);
   button4.onPressed(onButton4Pressed);
 
   if (button1.supportsInterrupt()) {
@@ -458,8 +471,14 @@ void renderRadar()
   }
   
   face.setTextColor(TFT_WHITE, TFT_BLACK);
-  face.drawString("WUKKTA25", 95, CLOCK_R * 0.70);
-  face.drawString(scanningEnabled ? "SCANNING" : "PAUSED", 95, CLOCK_R * 0.75);
+  face.drawString("WUKKTA25", 95, CLOCK_R * 0.60);
+  
+  if (lightDisplayMode) {
+    face.setTextColor(TFT_MAGENTA, TFT_BLACK);
+    face.drawString("LIGHT SHOW", 85, CLOCK_R * 0.75);
+  } else {
+    face.drawString(scanningEnabled ? "SCANNING" : "PAUSED", 95, CLOCK_R * 0.75);
+  }
 
   face.pushSprite(0, 0, TFT_TRANSPARENT);
 }
@@ -526,11 +545,40 @@ void renderDetailed()
   face.pushSprite(0, 0);
 }
 
+void renderCredits()
+{
+  face.fillSprite(TFT_BLACK);
+  face.setTextColor(TFT_GREEN, TFT_BLACK);
+  face.setTextSize(1);
+  
+  int y = CY - 45;
+  
+  face.drawString("WUKKTA25 BADGE", 75, y);
+  
+  y += 25;
+  face.setTextColor(TFT_CYAN, TFT_BLACK);
+  face.drawString("by Matt", 95, y);
+  
+  y += 25;
+  face.setTextColor(TFT_YELLOW, TFT_BLACK);
+  face.drawString("starring", 90, y);
+  
+  y += 20;
+  face.setTextColor(TFT_WHITE, TFT_BLACK);
+  face.drawString("Feroz, Niko,", 80, y);
+  
+  y += 15;
+  face.drawString("Paul, Will", 85, y);
+  
+  face.pushSprite(0, 0);
+}
+
 void renderDisplay() {
   switch(displayMode) {
     case 0: renderRadar(); break;
     case 1: renderBars(); break;
     case 2: renderDetailed(); break;
+    case 3: renderCredits(); break;
   }
 }
 // -------------------------------------------------------------------------
@@ -546,6 +594,13 @@ void loop()
   // Handle ping image display
   if (showPingImage) {
     showPingImage = false;
+    scanningWasPausedBeforePing = !scanningEnabled;
+    
+    if (scanningEnabled) {
+      pBLEScan->stop();
+      scanningEnabled = false;
+    }
+    
     isPinging = true;
     pingStartTime = millis();
     updateAdvertising();
@@ -557,11 +612,103 @@ void loop()
   
   unsigned long currentMillis = millis();
   
+  // Handle badge-triggered image display
+  if (showBadgeImage) {
+    showBadgeImage = false;
+    badgeImageStartTime = currentMillis;
+    
+    const byte* images[] = {screwdriver, coin, camera, puffa, sw};
+    const int imageSizes[] = {sizeof(screwdriver), sizeof(coin), sizeof(camera), sizeof(puffa), sizeof(sw)};
+    const char* imageNames[] = {"screwdriver", "coin", "camera", "puffa", "sw"};
+    
+    int16_t rc = png.openFLASH((uint8_t *)images[badgeImageIndex], imageSizes[badgeImageIndex], pngDraw);
+    if (rc == PNG_SUCCESS) {
+      tft.startWrite();
+      rc = png.decode(NULL, 0);
+      tft.endWrite();
+      Serial.printf("Badge detected! Showing: %s\n", imageNames[badgeImageIndex]);
+    }
+  }
+  
+  // Auto-clear badge image after duration
+  if (badgeImageStartTime > 0 && (currentMillis - badgeImageStartTime >= BADGE_IMAGE_DURATION)) {
+    badgeImageStartTime = 0;
+    displayDirty = true;
+  }
+  
+  // Handle BLE scanning state machine
+  if (scanningEnabled && !scanInProgress) {
+    // Start new scan (callback will handle completion)
+    Serial.println("Starting 10-second BLE scan...");
+    scanInProgress = true;
+    // Don't clear deviceCount - let devices accumulate
+    pBLEScan->start(SCAN_DURATION_MS, false);
+  }
+  
+  // Handle button 1 action (toggle scanning)
+  if (button1Action) {
+    button1Action = false;
+    scanningEnabled = !scanningEnabled;
+    displayDirty = true;
+    
+    if (!playingAnimation) {
+      activeLED = 0;
+      ledStartTime = millis();
+      lightLED(0);
+    }
+    
+    if (!scanningEnabled && scanInProgress) {
+      pBLEScan->stop();
+      scanInProgress = false;
+      Serial.println("Scanning PAUSED");
+    } else if (scanningEnabled) {
+      Serial.println("Scanning ENABLED");
+    }
+  }
+  
+  // Handle LED timeout (turn off after duration)
+  if (activeLED >= 0 && !playingAnimation && !lightDisplayMode && (currentMillis - ledStartTime >= LED_DURATION_MS)) {
+    turnOffAllLEDs();
+    activeLED = -1;
+  }
+  
+  // Light display mode - cycle through LEDs continuously
+  if (lightDisplayMode && !playingAnimation) {
+    if (currentMillis - lastLightDisplayUpdate >= LIGHT_DISPLAY_INTERVAL) {
+      lastLightDisplayUpdate = currentMillis;
+      lightLED(lightDisplayStep % 4);
+      lightDisplayStep++;
+      activeLED = -1;
+    }
+  }
+  
+  // Flash LED 0 when scanning is paused (to indicate button 1 will resume)
+  if (!scanningEnabled && !playingAnimation && !lightDisplayMode && activeLED < 0) {
+    if (currentMillis - lastPausedFlashTime >= PAUSED_FLASH_INTERVAL) {
+      pausedLEDState = !pausedLEDState;
+      lastPausedFlashTime = currentMillis;
+      
+      if (pausedLEDState) {
+        lightLED(0);
+      } else {
+        turnOffAllLEDs();
+      }
+    }
+  }
+  
   // Handle ping timeout
   if (isPinging && (currentMillis - pingStartTime >= PING_DURATION_MS)) {
     isPinging = false;
     updateAdvertising();
     Serial.println("Ping ended");
+    
+    // Auto-restart scanning after ping (unless it was paused before)
+    if (!scanningWasPausedBeforePing) {
+      scanningEnabled = true;
+      pBLEScan->start(2, false);
+      displayDirty = true;
+      Serial.println("Scanning auto-resumed");
+    }
   }
   
   // Only update display at max 20 FPS when dirty
