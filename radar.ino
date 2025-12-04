@@ -22,7 +22,13 @@ bool showPingImage = false;
 bool showBadgeImage = false;
 int badgeImageIndex = 0;
 unsigned long badgeImageStartTime = 0;
-#define BADGE_IMAGE_DURATION 2000
+#define BADGE_IMAGE_DURATION 4000
+
+#define MAX_IMAGE_QUEUE 5
+int imageQueue[MAX_IMAGE_QUEUE];
+int imageQueueCount = 0;
+int currentQueueIndex = 0;
+bool displayingQueuedImages = false;
 
 bool displayDirty = true;
 unsigned long lastDisplayUpdate = 0;
@@ -108,6 +114,8 @@ EasyButton button4(SW_PIN_D);
 
 #define MAX_DEVICES 5
 #define BADGE_NAME_PREFIX "Wukkta25-Badge"
+#define BADGE_USER_NAME "Sacha"
+#define BADGE_FULL_NAME BADGE_NAME_PREFIX "-" BADGE_USER_NAME
 
 struct BLEDeviceInfo {
   String address;
@@ -163,22 +171,24 @@ class MyScanCallbacks: public NimBLEScanCallbacks {
       Serial.printf("New badge: %s (%s) RSSI: %d\n", address.c_str(), name.c_str(), rssi);
     }
     
-    // Trigger image display for specific badge names
+    // Queue image for specific badge names
+    int imgIdx = -1;
     if (name.indexOf("feroz") >= 0 || name.indexOf("Feroz") >= 0) {
-      showBadgeImage = true;
-      badgeImageIndex = 3; // puffa
+      imgIdx = 3; // puffa
     } else if (name.indexOf("niko") >= 0 || name.indexOf("Niko") >= 0) {
-      showBadgeImage = true;
-      badgeImageIndex = 2; // camera
+      imgIdx = 2; // camera
     } else if (name.indexOf("paul") >= 0 || name.indexOf("Paul") >= 0) {
-      showBadgeImage = true;
-      badgeImageIndex = 1; // coin
+      imgIdx = 1; // coin
     } else if (name.indexOf("will") >= 0 || name.indexOf("Will") >= 0) {
-      showBadgeImage = true;
-      badgeImageIndex = 4; // switch
+      imgIdx = 4; // switch
     } else if (name.indexOf("matt") >= 0 || name.indexOf("Matt") >= 0) {
-      showBadgeImage = true;
-      badgeImageIndex = 0; // scredriver
+      imgIdx = 0; // screwdriver
+    }
+    
+    // Add to queue if we have a match and space
+    if (imgIdx >= 0 && imageQueueCount < MAX_IMAGE_QUEUE) {
+      imageQueue[imageQueueCount++] = imgIdx;
+      Serial.printf("Queued image %d for %s\n", imgIdx, name.c_str());
     }
   }
   displayDirty = true;
@@ -187,8 +197,15 @@ class MyScanCallbacks: public NimBLEScanCallbacks {
   void onScanEnd(const NimBLEScanResults& results, int reason) {
     Serial.printf("*** Scan complete. Reason: %d, Found %d total ads, Tracking %d badges ***\n", reason, results.getCount(), deviceCount);
     scanInProgress = false;
-    displayDirty = true;
-    delay(500); // Small delay before next scan
+    
+    // Start displaying queued images if any
+    if (imageQueueCount > 0) {
+      displayingQueuedImages = true;
+      currentQueueIndex = 0;
+      Serial.printf("Starting to display %d queued images\n", imageQueueCount);
+    } else {
+      displayDirty = true;
+    }
   }
 };
 
@@ -367,11 +384,11 @@ void setup(void) {
   timerAlarmWrite(animationTimer, 80000, true);
   timerAlarmEnable(animationTimer);
 
-  NimBLEDevice::init("Wukkta25-Badge-Matt");
+  NimBLEDevice::init(BADGE_FULL_NAME);
   
   // Set up advertising with device name
   NimBLEAdvertisementData advertisementData;
-  advertisementData.setName("Wukkta25-Badge-Matt");
+  advertisementData.setName(BADGE_FULL_NAME);
   advertisementData.setCompleteServices(NimBLEUUID("FEAD"));
   
   pAdvertising = NimBLEDevice::getAdvertising();
@@ -382,7 +399,7 @@ void setup(void) {
   
   Serial.println("========================================");
   Serial.println("BLE Advertising started");
-  Serial.printf("Name: Wukkta25-Badge-Matt\n");
+  Serial.printf("Name: %s\n", BADGE_FULL_NAME);
   Serial.printf("Address: %s\n", NimBLEDevice::getAddress().toString().c_str());
   Serial.println("========================================");
   
@@ -479,6 +496,9 @@ void renderRadar()
   } else {
     face.drawString(scanningEnabled ? "SCANNING" : "PAUSED", 95, CLOCK_R * 0.75);
   }
+  
+  face.setTextColor(TFT_BLUE, TFT_BLACK);
+  face.drawString(BADGE_USER_NAME, 105, CLOCK_R * 0.90);
 
   face.pushSprite(0, 0, TFT_TRANSPARENT);
 }
@@ -612,28 +632,37 @@ void loop()
   
   unsigned long currentMillis = millis();
   
-  // Handle badge-triggered image display
-  if (showBadgeImage) {
-    showBadgeImage = false;
-    badgeImageStartTime = currentMillis;
-    
-    const byte* images[] = {screwdriver, coin, camera, puffa, sw};
-    const int imageSizes[] = {sizeof(screwdriver), sizeof(coin), sizeof(camera), sizeof(puffa), sizeof(sw)};
-    const char* imageNames[] = {"screwdriver", "coin", "camera", "puffa", "sw"};
-    
-    int16_t rc = png.openFLASH((uint8_t *)images[badgeImageIndex], imageSizes[badgeImageIndex], pngDraw);
-    if (rc == PNG_SUCCESS) {
-      tft.startWrite();
-      rc = png.decode(NULL, 0);
-      tft.endWrite();
-      Serial.printf("Badge detected! Showing: %s\n", imageNames[badgeImageIndex]);
+  // Handle queued image display (sequential after scan)
+  if (displayingQueuedImages) {
+    if (badgeImageStartTime == 0) {
+      // Start showing current image in queue
+      const byte* images[] = {screwdriver, coin, camera, puffa, sw};
+      const int imageSizes[] = {sizeof(screwdriver), sizeof(coin), sizeof(camera), sizeof(puffa), sizeof(sw)};
+      const char* imageNames[] = {"screwdriver", "coin", "camera", "puffa", "sw"};
+      
+      int imgIdx = imageQueue[currentQueueIndex];
+      int16_t rc = png.openFLASH((uint8_t *)images[imgIdx], imageSizes[imgIdx], pngDraw);
+      if (rc == PNG_SUCCESS) {
+        tft.startWrite();
+        rc = png.decode(NULL, 0);
+        tft.endWrite();
+        Serial.printf("Displaying queued image %d/%d: %s\n", currentQueueIndex + 1, imageQueueCount, imageNames[imgIdx]);
+      }
+      badgeImageStartTime = currentMillis;
+    } else if (currentMillis - badgeImageStartTime >= BADGE_IMAGE_DURATION) {
+      // Image duration complete, move to next
+      currentQueueIndex++;
+      badgeImageStartTime = 0;
+      
+      if (currentQueueIndex >= imageQueueCount) {
+        // All images shown, reset
+        displayingQueuedImages = false;
+        imageQueueCount = 0;
+        currentQueueIndex = 0;
+        displayDirty = true;
+        Serial.println("All queued images displayed");
+      }
     }
-  }
-  
-  // Auto-clear badge image after duration
-  if (badgeImageStartTime > 0 && (currentMillis - badgeImageStartTime >= BADGE_IMAGE_DURATION)) {
-    badgeImageStartTime = 0;
-    displayDirty = true;
   }
   
   // Handle BLE scanning state machine
@@ -720,9 +749,27 @@ void loop()
 }
 
 void drawSplash() {
-  int16_t rc = png.openFLASH((uint8_t *)screwdriver, sizeof(screwdriver), pngDraw);
-  //int16_t rc = png.openFLASH((uint8_t *)sw, sizeof(sw), pngDraw);
-
+  // Select image based on badge user name
+  const byte* images[] = {screwdriver, coin, camera, puffa, sw};
+  const int imageSizes[] = {sizeof(screwdriver), sizeof(coin), sizeof(camera), sizeof(puffa), sizeof(sw)};
+  
+  int imgIdx = 0; // default to screwdriver
+  String userName = String(BADGE_USER_NAME);
+  userName.toLowerCase();
+  
+  if (userName.indexOf("feroz") >= 0) {
+    imgIdx = 3; // puffa
+  } else if (userName.indexOf("niko") >= 0) {
+    imgIdx = 2; // camera
+  } else if (userName.indexOf("paul") >= 0) {
+    imgIdx = 1; // coin
+  } else if (userName.indexOf("will") >= 0) {
+    imgIdx = 4; // sw
+  } else if (userName.indexOf("matt") >= 0) {
+    imgIdx = 0; // screwdriver
+  }
+  
+  int16_t rc = png.openFLASH((uint8_t *)images[imgIdx], imageSizes[imgIdx], pngDraw);
   if (rc == PNG_SUCCESS) {
     tft.startWrite();
     rc = png.decode(NULL, 0);
