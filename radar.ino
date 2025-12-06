@@ -24,7 +24,7 @@ int badgeImageIndex = 0;
 unsigned long badgeImageStartTime = 0;
 #define BADGE_IMAGE_DURATION 4000
 
-#define MAX_IMAGE_QUEUE 5
+#define MAX_IMAGE_QUEUE 6
 int imageQueue[MAX_IMAGE_QUEUE];
 int imageQueueCount = 0;
 int currentQueueIndex = 0;
@@ -114,7 +114,7 @@ EasyButton button4(SW_PIN_D);
 
 #define MAX_DEVICES 5
 #define BADGE_NAME_PREFIX "Wukkta25-Badge"
-#define BADGE_USER_NAME "Sacha"
+#define BADGE_USER_NAME "Feroz"
 #define BADGE_FULL_NAME BADGE_NAME_PREFIX "-" BADGE_USER_NAME
 
 struct BLEDeviceInfo {
@@ -183,6 +183,8 @@ class MyScanCallbacks: public NimBLEScanCallbacks {
       imgIdx = 4; // switch
     } else if (name.indexOf("matt") >= 0 || name.indexOf("Matt") >= 0) {
       imgIdx = 0; // screwdriver
+    }  else if (name.indexOf("sacha") >= 0 || name.indexOf("Sacha") >= 0) {
+      imgIdx = 5; // plant
     }
     
     // Add to queue if we have a match and space
@@ -339,9 +341,9 @@ void onButton3Pressed(){
 int currentImage = 0;
 
 void displayPingImage() {
-  const byte* images[] = {screwdriver, coin, camera, puffa, sw};
-  const int imageSizes[] = {sizeof(screwdriver), sizeof(coin), sizeof(camera), sizeof(puffa), sizeof(sw)};
-  const char* imageNames[] = {"screwdriver", "coin", "camera", "puffa", "sw"};
+  const byte* images[] = {screwdriver, coin, camera, puffa, sw, plant};
+  const int imageSizes[] = {sizeof(screwdriver), sizeof(coin), sizeof(camera), sizeof(puffa), sizeof(sw), sizeof(plant)};
+  const char* imageNames[] = {"screwdriver", "coin", "camera", "puffa", "sw", "plant"};
   
   int16_t rc = png.openFLASH((uint8_t *)images[currentImage], imageSizes[currentImage], pngDraw);
   if (rc == PNG_SUCCESS) {
@@ -353,7 +355,7 @@ void displayPingImage() {
   
   delay(1000);
   
-  currentImage = (currentImage + 1) % 5;
+  currentImage = (currentImage + 1) % 6;
 }
 
 void onButton4Pressed(){
@@ -588,7 +590,7 @@ void renderCredits()
   face.drawString("Feroz, Niko,", 80, y);
   
   y += 15;
-  face.drawString("Paul, Will", 85, y);
+  face.drawString("Paul, Will, Sacha", 85, y);
   
   face.pushSprite(0, 0);
 }
@@ -636,9 +638,9 @@ void loop()
   if (displayingQueuedImages) {
     if (badgeImageStartTime == 0) {
       // Start showing current image in queue
-      const byte* images[] = {screwdriver, coin, camera, puffa, sw};
-      const int imageSizes[] = {sizeof(screwdriver), sizeof(coin), sizeof(camera), sizeof(puffa), sizeof(sw)};
-      const char* imageNames[] = {"screwdriver", "coin", "camera", "puffa", "sw"};
+      const byte* images[] = {screwdriver, coin, camera, puffa, sw, plant};
+      const int imageSizes[] = {sizeof(screwdriver), sizeof(coin), sizeof(camera), sizeof(puffa), sizeof(sw), sizeof(plant)};
+      const char* imageNames[] = {"screwdriver", "coin", "camera", "puffa", "sw", "plant"};
       
       int imgIdx = imageQueue[currentQueueIndex];
       int16_t rc = png.openFLASH((uint8_t *)images[imgIdx], imageSizes[imgIdx], pngDraw);
@@ -750,8 +752,8 @@ void loop()
 
 void drawSplash() {
   // Select image based on badge user name
-  const byte* images[] = {screwdriver, coin, camera, puffa, sw};
-  const int imageSizes[] = {sizeof(screwdriver), sizeof(coin), sizeof(camera), sizeof(puffa), sizeof(sw)};
+  const byte* images[] = {screwdriver, coin, camera, puffa, sw, plant};
+  const int imageSizes[] = {sizeof(screwdriver), sizeof(coin), sizeof(camera), sizeof(puffa), sizeof(sw), sizeof(plant)};
   
   int imgIdx = 0; // default to screwdriver
   String userName = String(BADGE_USER_NAME);
@@ -767,6 +769,8 @@ void drawSplash() {
     imgIdx = 4; // sw
   } else if (userName.indexOf("matt") >= 0) {
     imgIdx = 0; // screwdriver
+  } else if (userName.indexOf("sacha") >= 0) {
+    imgIdx = 5; // screwdriver
   }
   
   int16_t rc = png.openFLASH((uint8_t *)images[imgIdx], imageSizes[imgIdx], pngDraw);
