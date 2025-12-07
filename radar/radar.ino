@@ -19,8 +19,6 @@ bool scanningWasPausedBeforePing = false;
 volatile bool playingAnimation = false;
 volatile int animationStep = 0;
 bool showPingImage = false;
-bool showBadgeImage = false;
-int badgeImageIndex = 0;
 unsigned long badgeImageStartTime = 0;
 #define BADGE_IMAGE_DURATION 4000
 
@@ -48,40 +46,40 @@ unsigned long lastLightDisplayUpdate = 0;
 #define LIGHT_DISPLAY_INTERVAL 100
 
 bool scanInProgress = false;
-unsigned long scanStartTime = 0;
 #define SCAN_DURATION_MS 10000
 
 volatile bool button1Action = false;
-volatile bool button3LongAction = false;
 
 hw_timer_t* animationTimer = NULL;
 portMUX_TYPE timerMux = portMUX_INITIALIZER_UNLOCKED;
 
-// PNG cruft
-PNG png; // PNG decoder instance
+// PNG decoder
+PNG png;
 #define MAX_IMAGE_WIDTH 240
 int16_t xpos = 0;
 int16_t ypos = 0;
 
-// Image ideas.....
-// show screwdriver spash image, pick user? 
-// then what, do we want others too? 
-// if so in flash? (for now yes)
+// Image data arrays - centralized to avoid repetition
+const byte* const IMAGES[] = {screwdriver, coin, camera, puffa, sw, plant};
+const int IMAGE_SIZES[] = {sizeof(screwdriver), sizeof(coin), sizeof(camera), sizeof(puffa), sizeof(sw), sizeof(plant)};
+const char* const IMAGE_NAMES[] = {"screwdriver", "coin", "camera", "puffa", "sw", "plant"};
+#define NUM_IMAGES 6
 
-// If we don't pick a user???
-// Just look for other badges and display strength? 
+// User names mapped to image indices
+const char* const USER_NAMES[] = {"matt", "paul", "niko", "feroz", "will", "sacha"};
+const int USER_IMAGE_IDX[] = {0, 1, 2, 3, 4, 5};
+#define NUM_USERS 6
 
-// function ideas:
-// scan for other badges, draw segments for each detected.
-// make number of segments variable
-// BT:
-// advertise self (allow naming??)
-// scan every X sections
-// flash LEDs? 
-// what shall the buttons do? 
-
-// button ideas
-// bluetooth macropad??
+int getImageIndexForName(const String& name) {
+  String lowerName = name;
+  lowerName.toLowerCase();
+  for (int i = 0; i < NUM_USERS; i++) {
+    if (lowerName.indexOf(USER_NAMES[i]) >= 0) {
+      return USER_IMAGE_IDX[i];
+    }
+  }
+  return -1;
+}
 
 
 
@@ -107,14 +105,18 @@ uint16_t radar_fg = 0x07C0;
 #define SW_PIN_C D9 // problem
 #define SW_PIN_D D2
 
+const uint8_t SW_PINS[] = {SW_PIN_A, SW_PIN_B, SW_PIN_C, SW_PIN_D};
+#define NUM_BUTTONS 4
+
 EasyButton button1(SW_PIN_A);
 EasyButton button2(SW_PIN_B);
 EasyButton button3(SW_PIN_C);
 EasyButton button4(SW_PIN_D);
+EasyButton* buttons[] = {&button1, &button2, &button3, &button4};
 
 #define MAX_DEVICES 5
 #define BADGE_NAME_PREFIX "Wukkta25-Badge"
-#define BADGE_USER_NAME "Feroz"
+#define BADGE_USER_NAME "Matt"
 #define BADGE_FULL_NAME BADGE_NAME_PREFIX "-" BADGE_USER_NAME
 
 struct BLEDeviceInfo {
@@ -172,20 +174,7 @@ class MyScanCallbacks: public NimBLEScanCallbacks {
     }
     
     // Queue image for specific badge names
-    int imgIdx = -1;
-    if (name.indexOf("feroz") >= 0 || name.indexOf("Feroz") >= 0) {
-      imgIdx = 3; // puffa
-    } else if (name.indexOf("niko") >= 0 || name.indexOf("Niko") >= 0) {
-      imgIdx = 2; // camera
-    } else if (name.indexOf("paul") >= 0 || name.indexOf("Paul") >= 0) {
-      imgIdx = 1; // coin
-    } else if (name.indexOf("will") >= 0 || name.indexOf("Will") >= 0) {
-      imgIdx = 4; // switch
-    } else if (name.indexOf("matt") >= 0 || name.indexOf("Matt") >= 0) {
-      imgIdx = 0; // screwdriver
-    }  else if (name.indexOf("sacha") >= 0 || name.indexOf("Sacha") >= 0) {
-      imgIdx = 5; // plant
-    }
+    int imgIdx = getImageIndexForName(name);
     
     // Add to queue if we have a match and space
     if (imgIdx >= 0 && imageQueueCount < MAX_IMAGE_QUEUE) {
@@ -340,22 +329,20 @@ void onButton3Pressed(){
 
 int currentImage = 0;
 
-void displayPingImage() {
-  const byte* images[] = {screwdriver, coin, camera, puffa, sw, plant};
-  const int imageSizes[] = {sizeof(screwdriver), sizeof(coin), sizeof(camera), sizeof(puffa), sizeof(sw), sizeof(plant)};
-  const char* imageNames[] = {"screwdriver", "coin", "camera", "puffa", "sw", "plant"};
-  
-  int16_t rc = png.openFLASH((uint8_t *)images[currentImage], imageSizes[currentImage], pngDraw);
+void displayImage(int imgIdx) {
+  int16_t rc = png.openFLASH((uint8_t *)IMAGES[imgIdx], IMAGE_SIZES[imgIdx], pngDraw);
   if (rc == PNG_SUCCESS) {
     tft.startWrite();
-    rc = png.decode(NULL, 0);
+    png.decode(NULL, 0);
     tft.endWrite();
-    Serial.printf("Displaying: %s\n", imageNames[currentImage]);
+    Serial.printf("Displaying: %s\n", IMAGE_NAMES[imgIdx]);
   }
-  
+}
+
+void displayPingImage() {
+  displayImage(currentImage);
   delay(1000);
-  
-  currentImage = (currentImage + 1) % 6;
+  currentImage = (currentImage + 1) % NUM_IMAGES;
 }
 
 void onButton4Pressed(){
@@ -414,29 +401,16 @@ void setup(void) {
   
   Serial.println("BLE Scanning initialized");
 
-  button1.begin();
-  button2.begin();
-  button3.begin();
-  button4.begin();
-
-  button1.onPressed(onButton1Pressed);
-  button2.onPressed(onButton2Pressed);
-  button3.onPressed(onButton3Pressed);
-  button4.onPressed(onButton4Pressed);
-
-  if (button1.supportsInterrupt()) {
-    button1.enableInterrupt(button1ISR);
+  void (*buttonCallbacks[])() = {onButton1Pressed, onButton2Pressed, onButton3Pressed, onButton4Pressed};
+  void (*buttonISRs[])() = {button1ISR, button2ISR, button3ISR, button4ISR};
+  
+  for (int i = 0; i < NUM_BUTTONS; i++) {
+    buttons[i]->begin();
+    buttons[i]->onPressed(buttonCallbacks[i]);
+    if (buttons[i]->supportsInterrupt()) {
+      buttons[i]->enableInterrupt(buttonISRs[i]);
+    }
   }
-  if (button2.supportsInterrupt()) {
-    button2.enableInterrupt(button2ISR);
-  }
-  if (button3.supportsInterrupt()) {
-    button3.enableInterrupt(button3ISR);
-  }
-  if (button4.supportsInterrupt()) {
-    button4.enableInterrupt(button4ISR);
-  }
-
 
   face.createSprite(tft.width(), tft.height());
 
@@ -445,14 +419,6 @@ void setup(void) {
 
 }
 
-
-
-// On startup, ask for user name, pick from list. 
-// Save name, work out how to store other user details 
-
-// TODO: scan for bluetooth devices (badges) and plot strengths
-// ideally with the smae device in each sector, and the top sector empty, for other info.
-// TODO: work out what signal strength looks like, then map from 0 to 120
 int mapRSSI(int rssi) {
   return map(constrain(rssi, -100, -30), -100, -30, 0, 120);
 }
@@ -460,9 +426,6 @@ int mapRSSI(int rssi) {
 void renderRadar()
 {
   face.fillSprite(TFT_BLACK);
-
-  uint32_t radius = 0;
-  float xp = 0.0, yp = 0.0;
 
   for (int i = 0; i < min(deviceCount, 4); i++) {
     int arcRadius = mapRSSI(discoveredDevices[i].rssi);
@@ -478,12 +441,11 @@ void renderRadar()
     face.drawSmoothArc(CX, CY, arcRadius, 0, startAngle, endAngle, color, TFT_BLACK);
   }
 
-  radius = 0;
-  while(radius < CX) {
-      face.drawSmoothCircle(CX, CY, radius, radar_fg, TFT_BLACK);
-      radius += 20;
+  for (uint32_t radius = 0; radius < CX; radius += 20) {
+    face.drawSmoothCircle(CX, CY, radius, radar_fg, TFT_BLACK);
   }
 
+  float xp, yp;
   for (uint16_t angle = 0; angle < 360; angle += 72) {
     getCoord(CX, CY, &xp, &yp, FACE_W, angle + 36);
     face.drawWideLine(CX, CY, xp, yp, 3, radar_fg, TFT_BLACK);
@@ -608,10 +570,9 @@ void renderDisplay() {
 // -------------------------------------------------------------------------
 void loop()
 {
-  button1.read();
-  button2.read();
-  button3.read();
-  button4.read();
+  for (int i = 0; i < NUM_BUTTONS; i++) {
+    buttons[i]->read();
+  }
   
   // Handle ping image display
   if (showPingImage) {
@@ -637,19 +598,9 @@ void loop()
   // Handle queued image display (sequential after scan)
   if (displayingQueuedImages) {
     if (badgeImageStartTime == 0) {
-      // Start showing current image in queue
-      const byte* images[] = {screwdriver, coin, camera, puffa, sw, plant};
-      const int imageSizes[] = {sizeof(screwdriver), sizeof(coin), sizeof(camera), sizeof(puffa), sizeof(sw), sizeof(plant)};
-      const char* imageNames[] = {"screwdriver", "coin", "camera", "puffa", "sw", "plant"};
-      
       int imgIdx = imageQueue[currentQueueIndex];
-      int16_t rc = png.openFLASH((uint8_t *)images[imgIdx], imageSizes[imgIdx], pngDraw);
-      if (rc == PNG_SUCCESS) {
-        tft.startWrite();
-        rc = png.decode(NULL, 0);
-        tft.endWrite();
-        Serial.printf("Displaying queued image %d/%d: %s\n", currentQueueIndex + 1, imageQueueCount, imageNames[imgIdx]);
-      }
+      displayImage(imgIdx);
+      Serial.printf("Displaying queued image %d/%d: %s\n", currentQueueIndex + 1, imageQueueCount, IMAGE_NAMES[imgIdx]);
       badgeImageStartTime = currentMillis;
     } else if (currentMillis - badgeImageStartTime >= BADGE_IMAGE_DURATION) {
       // Image duration complete, move to next
@@ -751,34 +702,9 @@ void loop()
 }
 
 void drawSplash() {
-  // Select image based on badge user name
-  const byte* images[] = {screwdriver, coin, camera, puffa, sw, plant};
-  const int imageSizes[] = {sizeof(screwdriver), sizeof(coin), sizeof(camera), sizeof(puffa), sizeof(sw), sizeof(plant)};
-  
-  int imgIdx = 0; // default to screwdriver
-  String userName = String(BADGE_USER_NAME);
-  userName.toLowerCase();
-  
-  if (userName.indexOf("feroz") >= 0) {
-    imgIdx = 3; // puffa
-  } else if (userName.indexOf("niko") >= 0) {
-    imgIdx = 2; // camera
-  } else if (userName.indexOf("paul") >= 0) {
-    imgIdx = 1; // coin
-  } else if (userName.indexOf("will") >= 0) {
-    imgIdx = 4; // sw
-  } else if (userName.indexOf("matt") >= 0) {
-    imgIdx = 0; // screwdriver
-  } else if (userName.indexOf("sacha") >= 0) {
-    imgIdx = 5; // screwdriver
-  }
-  
-  int16_t rc = png.openFLASH((uint8_t *)images[imgIdx], imageSizes[imgIdx], pngDraw);
-  if (rc == PNG_SUCCESS) {
-    tft.startWrite();
-    rc = png.decode(NULL, 0);
-    tft.endWrite();
-  }
+  int imgIdx = getImageIndexForName(BADGE_USER_NAME);
+  if (imgIdx < 0) imgIdx = 0;  // default to screwdriver
+  displayImage(imgIdx);
 }
 
 // =========================================================================
